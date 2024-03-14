@@ -1,0 +1,199 @@
+---
+title: "Метод отбора"
+author: "Олейник Михаил"
+output: html_notebook
+---
+
+# Метод отбора
+
+Напишем функцию, которая будет отбирать значения из выборки, которые попадают под график плотности:
+
+```{r}
+method_rejection <- function(samp, f, g, M = 1){
+  alpha <- runif(length(samp))
+  
+  samp[f(samp) > M * alpha * g(samp)]
+}
+```
+
+Теперь сделаем так, чтобы нам всегда возвращался вектор выборки нужной длины:
+
+```{r}
+r_method_rejection <- function(n, gen_samp, f, g, M = 1){
+  res <- c()
+  need_n <- floor(1.1 * n)
+  
+  while (need_n > 0) {
+    res <- c(res, method_rejection(gen_samp(need_n), f, g, M))
+    need_n <- floor(1.1 * (n - length(res)))
+  }
+  
+  res[1:n]
+}
+```
+
+Сгенерируем выборку нормального распределения (от $-4$ до $4$), используя равномерное на $[-4, 4]$:
+ 
+```{r}
+a <- -4
+b <- 4
+step_discret <- 0.01
+M <- max(sapply(seq(a, b, step_discret), function(x) dnorm(x) / dunif(x, min = a, max = b)))
+samp <- r_method_rejection(10000, function(n) runif(n, min = a, max = b), dnorm, function(x) dunif(x, min = a, max = b), M)
+```
+
+Посмотрим на гистограмму и плотность нормального:
+
+```{r}
+plot_distr <- function(samp, f, a, b, step_discret = 0.1){
+  hist(samp, probability = TRUE, xlab = "Sample", main = "Histogram and density")
+  lines(x = seq(a, b, step_discret), y = f(seq(a, b, step_discret)))
+}
+
+plot_distr(samp, dnorm, a, b)
+```
+
+## Адаптивный метод отбора
+
+Для адаптивного метода отбора построим функции ограничивающие искомую плотность сверху(касательными) и снизу(хордами):
+
+```{r}
+lower_eq <- function(x, points_x, points_y){
+  k <- 1
+  
+  while (k <= length(points_x) && x > points_x[k]) {
+    k <- k + 1 
+  }
+  
+  if (k == 1){
+    log(0)
+  }
+  else if (k == length(points_x) + 1){
+    log(0)
+  }
+  else{
+    (points_y[k] - points_y[k - 1]) / (points_x[k] - points_x[k - 1]) * (x - points_x[k]) + points_y[k]
+  }
+}
+
+upper_eq <- function(x, points_x, points_y, gradient){
+  k <- 1
+
+  while (k <= length(points_x) && x > points_x[k]) {
+    k <- k + 1 
+  }
+  
+  if (k == 1){
+    gradient[k] * (x - points_x[k]) + points_y[k]
+  }
+  else if (k == length(points_x) + 1){
+    gradient[k - 1] * (x - points_x[k - 1]) + points_y[k - 1]
+  }
+  else{
+    z <- (points_y[k] - points_y[k - 1] - (gradient[k] * points_x[k] - gradient[k - 1] * points_x[k - 1])) / (gradient[k - 1] - gradient[k])
+    
+    if (x < z){
+      gradient[k - 1] * (x - points_x[k - 1]) + points_y[k - 1]
+    }
+    else{
+      gradient[k] * (x - points_x[k]) + points_y[k]
+    }
+  }
+}
+```
+
+Посмотрим, как они выглядят при заданном множестве точек разбиения:
+
+```{r}
+points_x <- c(-9, -4, -1, -0.2, 0.5, 1, 3, 7)
+points_y <- log(dnorm(points_x))
+epsilon <- 1e-6
+gradient <- (log(dnorm(points_x + epsilon)) - log(dnorm(points_x - epsilon))) / (2 * epsilon)
+
+plot_d_lower_upper <- function(f, points_x, points_y, gradient, a, b, step_discret = 0.1){
+  plot(x = seq(a, b, step_discret), y = log(f(seq(a, b, step_discret))), type = "l", xlab = "", ylab = "")
+  lines(x = seq(a, b, step_discret), y = sapply(seq(a, b, step_discret), function(x) lower_eq(x, points_x, points_y)), type = "l", col = "red")
+  lines(x = seq(a, b, step_discret), y = sapply(seq(a, b, step_discret), function(x) upper_eq(x, points_x, points_y, gradient)), type = "l", col = "blue")
+  
+  plot(x = seq(a, b, step_discret), y = f(seq(a, b, step_discret)), type = "l", xlab = "", ylab = "")
+  lines(x = seq(a, b, step_discret), y = sapply(seq(a, b, step_discret), function(x) exp(lower_eq(x, points_x, points_y))), type = "l", col = "red")
+  lines(x = seq(a, b, step_discret), y = sapply(seq(a, b, step_discret), function(x) exp(upper_eq(x, points_x, points_y, gradient))), type = "l", col = "blue")
+}
+
+plot_d_lower_upper(dnorm, points_x, points_y, gradient, a, b)
+```
+
+Функция, возвращающая промоделированную точку по заданным точкам разбиения:
+
+```{r}
+adaptive_method_rejection <- function(gen_samp, f, g, points_x, points_y, gradient, M_upper = 1){
+  while (TRUE){
+    alpha <- runif(1)
+    x <- r_method_rejection(1, gen_samp, function(x) exp(upper_eq(x, points_x, points_y, gradient)), g, M_upper)
+
+    if (alpha <= exp(lower_eq(x, points_x, points_y) - upper_eq(x, points_x, points_y, gradient))){
+      return(x)
+    }
+    else if (alpha <= exp(log(f(x)) - upper_eq(x, points_x, points_y, gradient)))
+      return(x)
+  }
+}
+```
+
+Функция моделирующая $n$ точек адаптивным методом отбора:
+
+```{r}
+r_adaptive_method_rejection <- function(n, gen_samp, f, g, a, b, M = 1, max_points = 10, epsilon = 1e-6, step_discret = 1e-2){
+  res <- r_method_rejection(2, gen_samp, f, g, M)
+  points_x <- sort(res)
+  points_y <- log(f(points_x))
+  gradient <- (log(f(points_x + epsilon)) - log(f(points_x - epsilon))) / (2 * epsilon)
+  M_upper <- max(sapply(seq(a, b, step_discret), function(x) exp(upper_eq(x, points_x, points_y, gradient)) / g(x)))
+  
+  count <- 2
+  
+  while (count != n){
+    x_new <- adaptive_method_rejection(gen_samp, f, g, points_x, points_y, gradient, M_upper)
+    count <- count + 1
+    res <- c(res, x_new)
+    
+    if (length(points_x) < 10){
+      k <- 1
+  
+      while (k != length(points_x) + 1 && x_new > points_x[k]){
+        k <- k + 1
+      }
+      
+      if (k == 1){
+        points_x <- c(x_new, points_x)
+        points_y <- c(log(f(x_new)), points_y)
+        gradient <- c((log(f(x_new + epsilon)) - log(f(x_new - epsilon))) / (2 * epsilon), gradient)
+        M_upper <- max(c(M_upper, sapply(c(a, (points_y[2] - points_y[1] - (gradient[2] * points_x[2] - gradient[1] * points_x[1])) / (gradient[1] - gradient[2])), function(x) exp(upper_eq(x, points_x, points_y, gradient)) / g(x))))
+      }
+      else if (k == length(points_x) + 1){
+        points_x <- c(points_x, x_new)
+        points_y <- c(points_y, log(f(x_new)))
+        gradient <- c(gradient, (log(f(x_new + epsilon)) - log(f(x_new - epsilon))) / (2 * epsilon))
+        M_upper <- max(c(M_upper, sapply(c((points_y[k] - points_y[k - 1] - (gradient[k] * points_x[k] - gradient[k - 1] * points_x[k - 1])) / (gradient[k - 1] - gradient[k]), b), function(x) exp(upper_eq(x, points_x, points_y, gradient)) / g(x))))
+      }
+      else{
+        points_x <- c(points_x[1:(k - 1)], x_new, points_x[k:length(points_x)])
+        points_y <- c(points_y[1:(k - 1)], log(f(x_new)), points_y[k:length(points_y)])
+        gradient <- c(gradient[1:(k - 1)], (log(f(x_new + epsilon)) - log(f(x_new - epsilon))) / (2 * epsilon), gradient[k:length(gradient)])
+        M_upper <- max(c(M_upper, sapply(c((points_y[k] - points_y[k - 1] - (gradient[k] * points_x[k] - gradient[k - 1] * points_x[k - 1])) / (gradient[k - 1] - gradient[k]), (points_y[k + 1] - points_y[k] - (gradient[k + 1] * points_x[k + 1] - gradient[k] * points_x[k])) / (gradient[k] - gradient[k + 1])), function(x) exp(upper_eq(x, points_x, points_y, gradient)) / g(x))))
+      }
+    }
+  }
+  
+  list(samp = res, p_x = points_x, p_y = points_y, grad = gradient)
+}
+```
+
+Промоделируем $10000$ и посмотрим на распределение и ограничивающие ломанные/кривые:
+
+```{r}
+adapt_samp <- r_adaptive_method_rejection(10000, function(n) runif(n, a, b), dnorm, function(x) dunif(x, min = a, max = b), a, b, M)
+plot_distr(adapt_samp$samp, dnorm, a, b)
+plot_d_lower_upper(dnorm, adapt_samp$p_x, adapt_samp$p_y, adapt_samp$grad, a, b)
+```
+
